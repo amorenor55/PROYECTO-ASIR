@@ -1,0 +1,83 @@
+rules_version = '2';
+// Estas reglas se ejecutan en Firebase, aunque alguien omita la interfaz.
+service cloud.firestore {
+  match /databases/{baseDatos}/documents {
+    // Obtiene el perfil asociado al UID autenticado; las contraseñas no se guardan aquí.
+    function perfilActual() {
+      return get(/databases/$(baseDatos)/documents/usuarios/$(request.auth.uid)).data;
+    }
+    // Exige una cuenta, un perfil reconocido y un acceso activo antes de autorizar datos.
+    function autorizado() {
+      return request.auth != null && perfilActual().activo == true
+        && perfilActual().perfil in ['ADMINISTRACION','RECEPCION','MECANICO'];
+    }
+    // Administración y recepción comparten el permiso de abrir órdenes.
+    function esRecepcion() {
+      return autorizado() && perfilActual().perfil in ['ADMINISTRACION','RECEPCION'];
+    }
+    // La asignación se comprueba en el servicio, incluso si se modifica el navegador.
+    function puedeConsultar(datos) {
+      return autorizado() && (perfilActual().perfil != 'MECANICO' || datos.mecanicoId == request.auth.uid);
+    }
+    // Limita tipo y longitud para rechazar escrituras que no provengan del formulario.
+    function textoValido(valor, maximo) {
+      return valor is string && valor.size() <= maximo;
+    }
+    // Verifica los datos obligatorios y que el mecánico elegido exista y esté activo.
+    function recepcionValida(datos) {
+      return textoValido(datos.matricula,12) && datos.matricula.matches('^[A-Z0-9 -]{4,12}$')
+        && textoValido(datos.cliente,100) && datos.cliente.size() > 0
+        && textoValido(datos.vehiculo,100) && datos.vehiculo.size() > 0
+        && textoValido(datos.motivo,2000) && datos.motivo.size() > 0
+        && textoValido(datos.mecanicoId,128)
+        && (datos.mecanicoId == '' || (get(/databases/$(baseDatos)/documents/usuarios/$(datos.mecanicoId)).data.perfil == 'MECANICO'
+          && get(/databases/$(baseDatos)/documents/usuarios/$(datos.mecanicoId)).data.activo == true));
+    }
+    match /usuarios/{identificador} {
+      // Leer el propio perfil permite comprobar si la cuenta tiene acceso.
+      allow get: if request.auth != null && (request.auth.uid == identificador || autorizado());
+      allow list: if autorizado();
+      // Los perfiles se administran en la consola; nadie puede ascender su propio rol.
+      allow write: if false;
+    }
+    match /contadores/ordenes {
+      allow read: if esRecepcion();
+      // El contador solo avanza si se crea su orden en la misma transacción.
+      allow create, update: if esRecepcion()
+        && request.resource.data.keys().hasOnly(['ultimoNumero','ultimaOrdenId'])
+        && request.resource.data.ultimoNumero is int
+        && request.resource.data.ultimoNumero == (exists(/databases/$(baseDatos)/documents/contadores/ordenes) ? resource.data.ultimoNumero + 1 : 1)
+        && request.resource.data.ultimaOrdenId is string
+        && !exists(/databases/$(baseDatos)/documents/ordenes/$(request.resource.data.ultimaOrdenId))
+        && getAfter(/databases/$(baseDatos)/documents/ordenes/$(request.resource.data.ultimaOrdenId)).data.numero == request.resource.data.ultimoNumero;
+      allow delete: if false;
+    }
+    match /ordenes/{identificador} {
+      allow read: if puedeConsultar(resource.data);
+      // getAfter comprueba la orden y el contador tal como quedarán tras la transacción.
+      // Ambos deben hacer referencia a la misma reserva de numeración.
+      allow create: if esRecepcion()
+        && request.resource.data.keys().hasOnly(['matricula','cliente','vehiculo','motivo','mecanicoId','numero','diagnostico','estado','creadaEn','actualizadaEn','revision'])
+        && recepcionValida(request.resource.data)
+        && request.resource.data.numero is int && request.resource.data.numero > 0
+        && request.resource.data.numero == getAfter(/databases/$(baseDatos)/documents/contadores/ordenes).data.ultimoNumero
+        && getAfter(/databases/$(baseDatos)/documents/contadores/ordenes).data.ultimaOrdenId == identificador
+        && request.resource.data.diagnostico == '' && request.resource.data.estado == 'Pendiente'
+        && request.resource.data.revision == 1
+        && request.resource.data.creadaEn == request.time && request.resource.data.actualizadaEn == request.time;
+      // La recepción queda conservada. Esta entrega solo modifica diagnóstico y estado.
+      allow update: if puedeConsultar(resource.data)
+        && perfilActual().perfil in ['ADMINISTRACION','MECANICO']
+        && resource.data.estado != 'Finalizado'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['diagnostico','estado','revision','actualizadaEn'])
+        && textoValido(request.resource.data.diagnostico,4000)
+        && request.resource.data.estado in ['Pendiente','En curso','Finalizado']
+        && request.resource.data.revision is int
+        && request.resource.data.revision == resource.data.revision + 1
+        && request.resource.data.actualizadaEn == request.time;
+      allow delete: if false;
+    }
+    // Ninguna colección adicional queda abierta por defecto.
+    match /{documento=**} { allow read, write: if false; }
+  }
+}
