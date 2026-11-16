@@ -6,6 +6,7 @@ import { collection, doc, onSnapshot } from "firebase/firestore";
 import { obtenerFirebase } from "@/servicios/firebase";
 import { PERFILES } from "@/modelo/validaciones.mjs";
 const ContextoSesion = createContext(null);
+const ordenarNombres = new Intl.Collator("es", { numeric: true, sensitivity: "base" });
 export function usarSesion() {
   return useContext(ContextoSesion);
 }
@@ -85,7 +86,8 @@ export default function ProveedorSesion({ children }) {
                   ...elemento.data(),
                   identificador: elemento.id,
                 }))
-                .filter((persona) => persona.activo === true);
+                .filter((persona) => persona.activo === true)
+                .sort((a, b) => ordenarNombres.compare(a.nombre ?? "", b.nombre ?? ""));
               if (vigente)
                 establecerSesion((anterior) => ({ ...anterior, equipo }));
             },

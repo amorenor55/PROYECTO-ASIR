@@ -11,6 +11,9 @@ service cloud.firestore {
       return request.auth != null && perfilActual().activo == true
         && perfilActual().perfil in ['ADMINISTRACION','RECEPCION','MECANICO'];
     }
+    function esAdministracion() {
+      return autorizado() && perfilActual().perfil == 'ADMINISTRACION';
+    }
     // Administración y recepción comparten el permiso de abrir órdenes.
     function esRecepcion() {
       return autorizado() && perfilActual().perfil in ['ADMINISTRACION','RECEPCION'];
@@ -29,9 +32,12 @@ service cloud.firestore {
         && textoValido(datos.cliente,100) && datos.cliente.size() > 0
         && textoValido(datos.vehiculo,100) && datos.vehiculo.size() > 0
         && textoValido(datos.motivo,2000) && datos.motivo.size() > 0
-        && textoValido(datos.mecanicoId,128)
-        && (datos.mecanicoId == '' || (get(/databases/$(baseDatos)/documents/usuarios/$(datos.mecanicoId)).data.perfil == 'MECANICO'
-          && get(/databases/$(baseDatos)/documents/usuarios/$(datos.mecanicoId)).data.activo == true));
+        && asignacionValida(datos.mecanicoId);
+    }
+    function asignacionValida(uid) {
+      return textoValido(uid,128)
+        && (uid == '' || (get(/databases/$(baseDatos)/documents/usuarios/$(uid)).data.perfil == 'MECANICO'
+          && get(/databases/$(baseDatos)/documents/usuarios/$(uid)).data.activo == true));
     }
     match /usuarios/{identificador} {
       // Leer el propio perfil permite comprobar si la cuenta tiene acceso.
@@ -52,6 +58,30 @@ service cloud.firestore {
         && getAfter(/databases/$(baseDatos)/documents/ordenes/$(request.resource.data.ultimaOrdenId)).data.numero == request.resource.data.ultimoNumero;
       allow delete: if false;
     }
+    function rutaOrden(id) {
+      return /databases/$(baseDatos)/documents/ordenes/$(id);
+    }
+    function rutaPapelera(id) {
+      return /databases/$(baseDatos)/documents/papeleraOrdenes/$(id);
+    }
+    function vigente(datos) {
+      return request.time < datos.eliminadaEn + duration.value(15, 'd');
+    }
+    match /papeleraOrdenes/{identificador} {
+      allow read: if esAdministracion();
+      // El traslado conserva la orden completa y solo se autoriza en la misma escritura.
+      allow create: if esAdministracion()
+        && request.resource.data.keys().hasOnly(['orden','eliminadaEn','caducaEn','confirmacion'])
+        && request.resource.data.confirmacion == 'CONFIRMAR'
+        && request.resource.data.eliminadaEn == request.time
+        && request.resource.data.caducaEn is timestamp
+        && request.resource.data.caducaEn >= request.time + duration.value(15, 'd')
+        && request.resource.data.caducaEn <= request.time + duration.value(15, 'd') + duration.value(60, 's')
+        && request.resource.data.orden == get(rutaOrden(identificador)).data
+        && !existsAfter(rutaOrden(identificador));
+      allow delete: if esAdministracion() && vigente(resource.data)
+        && getAfter(rutaOrden(identificador)).data == resource.data.orden;
+    }
     match /ordenes/{identificador} {
       allow read: if puedeConsultar(resource.data);
       // getAfter comprueba la orden y el contador tal como quedarán tras la transacción.
@@ -61,21 +91,81 @@ service cloud.firestore {
         && recepcionValida(request.resource.data)
         && request.resource.data.numero is int && request.resource.data.numero > 0
         && request.resource.data.numero == getAfter(/databases/$(baseDatos)/documents/contadores/ordenes).data.ultimoNumero
+        && (!exists(/databases/$(baseDatos)/documents/contadores/ordenes)
+          || request.resource.data.numero > get(/databases/$(baseDatos)/documents/contadores/ordenes).data.ultimoNumero)
         && getAfter(/databases/$(baseDatos)/documents/contadores/ordenes).data.ultimaOrdenId == identificador
         && request.resource.data.diagnostico == '' && request.resource.data.estado == 'Pendiente'
         && request.resource.data.revision == 1
         && request.resource.data.creadaEn == request.time && request.resource.data.actualizadaEn == request.time;
-      // La recepción queda conservada. Esta entrega solo modifica diagnóstico y estado.
+      allow create: if esAdministracion()
+        && vigente(get(rutaPapelera(identificador)).data)
+        && request.resource.data == get(rutaPapelera(identificador)).data.orden
+        && !existsAfter(rutaPapelera(identificador));
+      function soloCambia(campos) {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(campos);
+      }
+      function seguimientoValido() {
+        return perfilActual().perfil in ['ADMINISTRACION','MECANICO']
+          && soloCambia(['diagnostico','estado','revision','actualizadaEn'])
+          && textoValido(request.resource.data.diagnostico,4000)
+          && request.resource.data.estado in ['Pendiente','En curso','Finalizado']
+          && (request.resource.data.estado != 'Finalizado'
+            || request.resource.data.diagnostico.matches('(?s).*[^[:space:]].*'));
+      }
+      function asignacionPermitida() {
+        return esRecepcion()
+          && soloCambia(['mecanicoId','revision','actualizadaEn'])
+          && asignacionValida(request.resource.data.mecanicoId);
+      }
+      function reaperturaPermitida() {
+        return perfilActual().perfil == 'ADMINISTRACION'
+          && request.resource.data.estado == 'En curso'
+          && soloCambia(['estado','revision','actualizadaEn']);
+      }
+      function fotoValida(foto) {
+        return foto.keys().hasOnly(['categoria','imagen'])
+          && foto.categoria in ['Entrada','Salida','Daños','Recambios','Otros']
+          && foto.imagen is string && foto.imagen.size() <= 150000
+          && foto.imagen.matches('^data:image/jpeg;base64,[A-Za-z0-9+/]+={0,2}$');
+      }
+      function fotosValidas(fotos) {
+        return fotos is list && fotos.size() <= 5
+          && (fotos.size() < 1 || fotoValida(fotos[0]))
+          && (fotos.size() < 2 || fotoValida(fotos[1]))
+          && (fotos.size() < 3 || fotoValida(fotos[2]))
+          && (fotos.size() < 4 || fotoValida(fotos[3]))
+          && (fotos.size() < 5 || fotoValida(fotos[4]));
+      }
+      function galeriaPermitida() {
+        return soloCambia(['fotos','revision','actualizadaEn'])
+          && fotosValidas(request.resource.data.fotos);
+      }
+      function documentoValido(adjunto) {
+        return adjunto is map && adjunto.keys().hasOnly(['nombre','tipo','contenido','archivoId'])
+          && textoValido(adjunto.nombre,120) && adjunto.nombre.size() > 0
+          && adjunto.tipo in ['Presupuesto','Factura','Parte de trabajo','Autorización','Otros']
+          && (('archivoId' in adjunto && !('contenido' in adjunto)
+              && adjunto.archivoId is string && adjunto.archivoId.matches('^[a-f0-9-]{36}$'))
+            || (!('archivoId' in adjunto) && adjunto.contenido is bytes
+              && adjunto.contenido.size() > 0 && adjunto.contenido.size() <= 122880));
+      }
+      function documentosPermitidos() {
+        let adjuntos = request.resource.data.documentos;
+        return esRecepcion() && soloCambia(['documentos','revision','actualizadaEn'])
+          && adjuntos is list && adjuntos.size() <= 2
+          && (adjuntos.size() < 1 || documentoValido(adjuntos[0]))
+          && (adjuntos.size() < 2 || documentoValido(adjuntos[1]));
+      }
+      // Cada operación tiene sus propios permisos y campos. Todas avanzan la revisión.
       allow update: if puedeConsultar(resource.data)
-        && perfilActual().perfil in ['ADMINISTRACION','MECANICO']
-        && resource.data.estado != 'Finalizado'
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['diagnostico','estado','revision','actualizadaEn'])
-        && textoValido(request.resource.data.diagnostico,4000)
-        && request.resource.data.estado in ['Pendiente','En curso','Finalizado']
         && request.resource.data.revision is int
         && request.resource.data.revision == resource.data.revision + 1
-        && request.resource.data.actualizadaEn == request.time;
-      allow delete: if false;
+        && request.resource.data.actualizadaEn == request.time
+        && (resource.data.estado == 'Finalizado'
+          ? reaperturaPermitida()
+          : (seguimientoValido() || asignacionPermitida() || galeriaPermitida() || documentosPermitidos()));
+      allow delete: if esAdministracion() && !exists(rutaPapelera(identificador))
+        && getAfter(rutaPapelera(identificador)).data.orden == resource.data;
     }
     // Ninguna colección adicional queda abierta por defecto.
     match /{documento=**} { allow read, write: if false; }

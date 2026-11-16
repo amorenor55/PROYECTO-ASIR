@@ -3,6 +3,7 @@
 import { getApps, initializeApp } from "firebase/app";
 import { getAuth, connectAuthEmulator } from "firebase/auth";
 import { getFirestore, connectFirestoreEmulator } from "firebase/firestore";
+import { getStorage, connectStorageEmulator } from "firebase/storage";
 import configuracion from "@/configuracion/firebase.json";
 
 export function obtenerFirebase() {
@@ -14,12 +15,14 @@ export function obtenerFirebase() {
     opciones.projectId = "demo-dmt-asir";
     opciones.authDomain = "demo-dmt-asir.firebaseapp.com";
     opciones.apiKey = "clave-local";
+    opciones.storageBucket = "demo-dmt-asir.appspot.com";
   }
   const aplicacion =
     getApps().find((elemento) => elemento.name === "dmt") ||
     initializeApp(opciones, "dmt");
   const autenticacion = getAuth(aplicacion);
   const baseDatos = getFirestore(aplicacion);
+  const archivos = getStorage(aplicacion);
   if (
     process.env.NEXT_PUBLIC_USAR_EMULADORES === "true" &&
     typeof window !== "undefined" &&
@@ -29,7 +32,8 @@ export function obtenerFirebase() {
       disableWarnings: true,
     });
     connectFirestoreEmulator(baseDatos, "127.0.0.1", 8080);
+    connectStorageEmulator(archivos, "127.0.0.1", 9199);
     window.__emuladoresDmtConectados = true;
   }
-  return { autenticacion, baseDatos };
+  return { autenticacion, baseDatos, archivos };
 }

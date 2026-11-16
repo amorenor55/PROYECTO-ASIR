@@ -15,5 +15,27 @@
       ]
     }
   ],
-  "fieldOverrides": []
+  "fieldOverrides": [
+    {
+      "collectionGroup": "papeleraOrdenes",
+      "fieldPath": "caducaEn",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "papeleraOrdenes",
+      "fieldPath": "orden",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "ordenes",
+      "fieldPath": "fotos",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "ordenes",
+      "fieldPath": "documentos",
+      "indexes": []
+    }
+  ]
 }

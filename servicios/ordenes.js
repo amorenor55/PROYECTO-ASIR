@@ -7,19 +7,21 @@ import {
   collection,
   doc,
   getDoc,
+  Timestamp,
   onSnapshot,
   query,
   where,
   orderBy,
-  limit,
   runTransaction,
   serverTimestamp,
 } from "firebase/firestore";
+import { RETENCION_MS } from "@/modelo/papelera.mjs";
 import { obtenerFirebase } from "./firebase";
 import {
   comprobarPerfil,
   validarRecepcion,
   validarDiagnostico,
+  validarAsignacion,
   puedeConsultar,
 } from "@/modelo/validaciones.mjs";
 
@@ -35,9 +37,7 @@ function convertirDocumento(documento) {
   };
 }
 
-/** Escucha las últimas 100 órdenes autorizadas y devuelve cómo cancelar la escucha.
- * El límite reduce las lecturas; el panel y los filtros usan este mismo conjunto.
- */
+/** Escucha el historial completo autorizado para que la búsqueda incluya órdenes antiguas. */
 export function escucharOrdenes(usuario, recibirOrdenes, recibirError) {
   const { baseDatos } = obtenerFirebase();
   const condiciones =
@@ -49,7 +49,6 @@ export function escucharOrdenes(usuario, recibirOrdenes, recibirError) {
     collection(baseDatos, "ordenes"),
     ...condiciones,
     orderBy("actualizadaEn", "desc"),
-    limit(100),
   );
   return onSnapshot(
     consulta,
@@ -106,7 +105,20 @@ export async function crearOrden(usuario, datos, equipo) {
  */
 export async function guardarDiagnostico(usuario, orden, datos) {
   comprobarPerfil(usuario, ["ADMINISTRACION", "MECANICO"]);
-  const cambios = validarDiagnostico(datos);
+  return actualizarOrden(usuario, orden, validarDiagnostico(datos), false);
+}
+
+export function asignarMecanico(usuario, orden, mecanicoId, equipo) {
+  comprobarPerfil(usuario, ["ADMINISTRACION", "RECEPCION"]);
+  return actualizarOrden(usuario, orden, { mecanicoId: validarAsignacion(mecanicoId, equipo) }, false);
+}
+
+export function reabrirOrden(usuario, orden) {
+  comprobarPerfil(usuario, ["ADMINISTRACION"]);
+  return actualizarOrden(usuario, orden, { estado: "En curso" }, true);
+}
+
+async function actualizarOrden(usuario, orden, cambios, reapertura) {
   const { baseDatos } = obtenerFirebase();
   const referencia = doc(baseDatos, "ordenes", orden.identificador);
   await runTransaction(baseDatos, async (transaccion) => {
@@ -119,8 +131,10 @@ export async function guardarDiagnostico(usuario, orden, datos) {
       throw new Error(
         "La orden ha cambiado. Recarga la ficha antes de guardar.",
       );
-    if (actual.estado === "Finalizado")
-      throw new Error("La orden está finalizada y es de solo consulta.");
+    if (reapertura && actual.estado !== "Finalizado")
+      throw new Error("Solo se puede reabrir una orden finalizada.");
+    if (!reapertura && actual.estado === "Finalizado")
+      throw new Error("Reabre la orden antes de modificarla.");
     transaccion.update(referencia, {
       ...cambios,
       revision: actual.revision + 1,
@@ -128,6 +142,66 @@ export async function guardarDiagnostico(usuario, orden, datos) {
     });
   });
   return obtenerOrden(usuario, orden.identificador);
+}
+
+export function guardarFotos(usuario, orden, fotos) {
+  return actualizarOrden(usuario, orden, { fotos }, false);
+}
+
+export function guardarDocumentos(usuario, orden, documentos) {
+  comprobarPerfil(usuario, ["ADMINISTRACION", "RECEPCION"]);
+  return actualizarOrden(usuario, orden, { documentos }, false);
+}
+
+export async function enviarAPapelera(usuario, orden, confirmacion) {
+  comprobarPerfil(usuario, ["ADMINISTRACION"]);
+  if (confirmacion !== "CONFIRMAR") throw new Error("Escribe CONFIRMAR.");
+  const { baseDatos } = obtenerFirebase();
+  const origen = doc(baseDatos, "ordenes", orden.identificador);
+  const destino = doc(baseDatos, "papeleraOrdenes", orden.identificador);
+  await runTransaction(baseDatos, async (transaccion) => {
+    const actual = await transaccion.get(origen);
+    if (!actual.exists() || actual.data().revision !== orden.revision)
+      throw new Error("La orden ha cambiado. Recarga la ficha.");
+    transaccion.set(destino, {
+      orden: actual.data(),
+      confirmacion,
+      eliminadaEn: serverTimestamp(),
+      // Firestore verifica esta fecha y fija el inicio de la retención con su propio reloj.
+      caducaEn: Timestamp.fromMillis(Date.now() + RETENCION_MS + 30000),
+    });
+    transaccion.delete(origen);
+  });
+}
+
+export function escucharPapelera(usuario, recibir, fallar) {
+  comprobarPerfil(usuario, ["ADMINISTRACION"]);
+  const { baseDatos } = obtenerFirebase();
+  return onSnapshot(query(collection(baseDatos, "papeleraOrdenes"), orderBy("eliminadaEn", "desc")),
+    (resultado) => recibir(resultado.docs.flatMap((documento) => {
+      const datos = documento.data();
+      if (!datos.eliminadaEn) return [];
+      return [{
+        identificador: documento.id,
+        numero: datos.orden.numero,
+        matricula: datos.orden.matricula,
+        vence: datos.eliminadaEn.toMillis() + RETENCION_MS,
+      }];
+    })), fallar);
+}
+
+export async function recuperarOrden(usuario, identificador) {
+  comprobarPerfil(usuario, ["ADMINISTRACION"]);
+  const { baseDatos } = obtenerFirebase();
+  const origen = doc(baseDatos, "papeleraOrdenes", identificador);
+  const destino = doc(baseDatos, "ordenes", identificador);
+  await runTransaction(baseDatos, async (transaccion) => {
+    const copia = await transaccion.get(origen);
+    if (!copia.exists() || copia.data().eliminadaEn.toMillis() + RETENCION_MS <= Date.now())
+      throw new Error("El plazo de recuperación ha terminado.");
+    transaccion.set(destino, copia.data().orden);
+    transaccion.delete(origen);
+  });
 }
 
 // Traduce los fallos habituales de Firebase a mensajes comprensibles para el usuario.

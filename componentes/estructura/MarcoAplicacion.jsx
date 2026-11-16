@@ -21,6 +21,8 @@ export default function MarcoAplicacion({ usuario, children }) {
   ];
   if (["ADMINISTRACION", "RECEPCION"].includes(usuario.perfil))
     enlaces.push(["/ordenes/nueva", "Nueva recepción"]);
+  if (usuario.perfil === "ADMINISTRACION")
+    enlaces.push(["/papelera", "Papelera"]);
   async function salir() {
     establecerSaliendo(true);
     try {

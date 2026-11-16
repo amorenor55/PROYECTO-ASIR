@@ -30,11 +30,16 @@ export function validarRecepcion(datos, equipo) {
   const cliente = comprobarTexto(datos.cliente || "", 100);
   const vehiculo = comprobarTexto(datos.vehiculo || "", 100);
   const motivo = comprobarTexto(datos.motivo || "", 2000);
-  const mecanicoId = comprobarTexto(datos.mecanicoId || "", 128);
+  const mecanicoId = validarAsignacion(datos.mecanicoId || "", equipo);
   if (!/^[A-Z0-9 -]{4,12}$/.test(matricula))
     throw new Error("Revisa la matrícula del vehículo.");
   if (!cliente || !vehiculo || !motivo)
     throw new Error("Completa cliente, vehículo y motivo de la visita.");
+  return { matricula, cliente, vehiculo, motivo, mecanicoId };
+}
+
+export function validarAsignacion(valor, equipo) {
+  const mecanicoId = comprobarTexto(valor, 128);
   if (
     mecanicoId &&
     !equipo.some(
@@ -45,15 +50,18 @@ export function validarRecepcion(datos, equipo) {
     )
   )
     throw new Error("Selecciona un mecánico activo del equipo.");
-  return { matricula, cliente, vehiculo, motivo, mecanicoId };
+  return mecanicoId;
 }
 
 // Acepta un estado conocido y limita el diagnóstico; no permite añadir otros campos.
 export function validarDiagnostico(datos) {
   if (!ESTADOS.includes(datos.estado))
     throw new Error("Selecciona un estado válido.");
+  const diagnostico = comprobarTexto(datos.diagnostico || "", 4000);
+  if (datos.estado === "Finalizado" && !diagnostico)
+    throw new Error("Escribe un diagnóstico antes de finalizar la orden.");
   return {
-    diagnostico: comprobarTexto(datos.diagnostico || "", 4000),
+    diagnostico,
     estado: datos.estado,
   };
 }

@@ -38,7 +38,7 @@ Cada orden recibe una numeración correlativa, presentada como `OR-0001`, `OR-00
 
 El listado permite buscar por número de orden, matrícula, cliente o vehículo, además de filtrar por estado. Los mecánicos consultan únicamente los trabajos que tienen asignados.
 
-La consulta carga hasta 100 órdenes, ordenadas por su última actualización. La búsqueda, los filtros y los contadores del panel se aplican a ese conjunto; no representan necesariamente todo el histórico si se supera el límite.
+La consulta escucha todas las órdenes activas que el perfil puede leer, ordenadas por su última actualización. La búsqueda, los filtros y los contadores del panel usan ese historial completo. Esta solución está pensada para un taller pequeño. Si aumenta el volumen, las lecturas y el tráfico crecen con el historial.
 
 ### Diagnóstico y seguimiento
 
@@ -50,17 +50,18 @@ La ficha conserva los datos de recepción y permite registrar un diagnóstico y 
 | En curso | Trabajo en desarrollo |
 | Finalizado | Orden cerrada y disponible para consulta |
 
-Una orden finalizada no admite nuevas modificaciones. Mientras permanece abierta, puede cambiar entre los estados admitidos sin exigir una secuencia fija.
+Recepción y administración pueden asignar, cambiar o retirar el mecánico desde la ficha de una orden abierta. Para finalizar una orden hace falta un diagnóstico y confirmar la acción. Administración puede reabrirla y devolverla a «En curso», conservando el diagnóstico y la asignación.
 
 ## Permisos
 
 | Operación | Administración | Recepción | Mecánico |
 |---|---|---|---|
 | Consultar órdenes | Todas | Todas | Solo asignadas |
-| Crear órdenes y asignar mecánico | Sí | Sí | No |
+| Crear órdenes | Sí | Sí | No |
+| Cambiar la asignación de una orden abierta | Sí | Sí | No |
 | Actualizar diagnóstico y estado | Sí | No | Solo asignadas |
 | Modificar los datos de recepción tras el alta | No | No | No |
-| Modificar órdenes finalizadas | No | No | No |
+| Reabrir órdenes finalizadas | Sí | No | No |
 | Cambiar perfiles desde la aplicación | No | No | No |
 
 Las restricciones se aplican en las reglas de Firestore, además de reflejarse en las opciones de la interfaz.
@@ -76,7 +77,7 @@ Las restricciones se aplican en las reglas de Firestore, además de reflejarse e
 | Firebase Authentication | Identificación de usuarios mediante correo y contraseña |
 | Cloud Firestore | Persistencia, consultas y transacciones |
 | Reglas de Firestore | Autorización y validación de operaciones sobre los datos |
-| Vercel | Plataforma de alojamiento prevista |
+| Vercel | Alojamiento de la aplicación web |
 
 ## Organización del código
 
@@ -114,7 +115,7 @@ La asignación utiliza `mecanicoId`, que referencia el UID del mecánico. Las co
 
 **Numeración mediante transacciones.** La reserva del número y la creación de la orden se confirman juntas. Así se evita que dos altas simultáneas utilicen la misma numeración o que se confirme solo una parte de la operación.
 
-**Control de revisión.** Antes de actualizar un diagnóstico, se compara la revisión de la ficha con la guardada. Si otra persona ha modificado la orden, se solicita recargar para evitar sobrescribir sus cambios. Este contador no constituye un historial de auditoría.
+**Control de revisión.** Antes de actualizar una orden, se compara la revisión de la ficha con la guardada. Si otra persona ha modificado la orden, se solicita recargar para evitar sobrescribir sus cambios. Este contador no constituye un historial de auditoría.
 
 **Fechas del servicio.** Las marcas de creación y actualización se asignan mediante Firestore para no depender del reloj de cada equipo.
 
@@ -122,3 +123,22 @@ La asignación utiliza `mecanicoId`, que referencia el UID del mecánico. Las co
 
 **Seguridad en el servicio de datos.** El navegador utiliza el SDK web de Firebase y las reglas comprueban las operaciones. La protección no depende únicamente de ocultar botones ni de las validaciones de los formularios.
 
+
+## Documentos adjuntos
+
+Administración y recepción pueden adjuntar y retirar hasta dos PDF por orden abierta, de hasta 20 MB cada uno. Se pueden clasificar como Presupuesto, Factura, Parte de trabajo, Autorización u Otros. La aplicación permite descargar los archivos a los usuarios autorizados para ver la orden.
+
+Los PDF nuevos se guardan en Cloud Storage. Firestore conserva el nombre, el tipo y el identificador. Los adjuntos anteriores guardados dentro de Firestore se pueden seguir descargando. Los archivos vinculados quedan inaccesibles al enviar la orden a la papelera y vuelven a estar disponibles cuando se recupera.
+
+Para probar en local, incluye Storage en el comando de emuladores (`--only auth,firestore,storage`). Para publicar:
+
+1. Habilita Cloud Storage en Firebase (plan Blaze) y comprueba el bucket de `configuracion/firebase.json`.
+2. Despliega Firestore, Storage y las funciones de limpieza con `npx firebase-tools deploy --only firestore:rules,firestore:indexes,storage,functions --project ID_DEL_PROYECTO`. Autoriza la consulta de Firestore desde las reglas de Storage si se solicita.
+3. Configura CORS en el bucket con `gcloud storage buckets update gs://NOMBRE_DEL_BUCKET --cors-file=storage.cors.json`. Ajusta los orígenes si cambia el dominio.
+4. Comprueba la política TTL de la papelera. Las funciones eliminan de Storage los PDF retirados de una orden y los PDF y las fotos de las órdenes caducadas cuando Firestore elimina su documento de papelera. El borrado real depende de su despliegue y de la política de retención del bucket.
+
+## Fotografías y papelera
+
+La galería admite fotografías JPG, PNG y WebP de hasta 10 MB por imagen, agrupadas en Entrada, Salida, Daños, Recambios y Otros. Las fotos nuevas se guardan en Cloud Storage sin un máximo por orden o categoría. Las fotografías guardadas anteriormente en Firestore siguen apareciendo en la galería. Una orden finalizada permite consultar la galería y debe reabrirse para modificarla.
+
+Administración puede enviar una orden a la papelera escribiendo `CONFIRMAR`. El traslado conserva el identificador, la numeración y las fotos. La orden desaparece del listado y del panel. Durante quince días se puede recuperar desde **Papelera**. El plazo se comprueba en Firestore con la hora del servidor. Al vencer se bloquea la restauración. El borrado definitivo lo realiza la política TTL sobre `papeleraOrdenes.caducaEn` y puede demorarse después del vencimiento. Las copias externas tienen su propio plazo de conservación.

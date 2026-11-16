@@ -2,17 +2,24 @@
 /** Consulta la recepción y permite al mecánico asignado registrar el diagnóstico. */
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import DocumentosOrden from "./DocumentosOrden";
+import GaleriaOrden from "./GaleriaOrden";
 import { usarSesion } from "@/componentes/sesion/ProveedorSesion";
 import {
   obtenerOrden,
+  asignarMecanico,
+  reabrirOrden,
+  enviarAPapelera,
   guardarDiagnostico,
   explicarError,
   mostrarNumero,
 } from "@/servicios/ordenes";
-import { ESTADOS } from "@/modelo/validaciones.mjs";
+import { ESTADOS, validarDiagnostico } from "@/modelo/validaciones.mjs";
 import EtiquetaEstado from "./EtiquetaEstado";
 export default function FichaOrden({ identificador }) {
   const { usuario, equipo } = usarSesion();
+  const navegador = useRouter();
   const [orden, establecerOrden] = useState(null);
   const [error, establecerError] = useState("");
   const [mensaje, establecerMensaje] = useState("");
@@ -34,21 +41,47 @@ export default function FichaOrden({ identificador }) {
       vigente = false;
     };
   }, [identificador, usuario?.identificador, usuario?.perfil]);
-  // Actualiza la ficha con la respuesta guardada para conservar su nueva revisión.
-  async function guardar(evento) {
-    evento.preventDefault();
+  // Todas las operaciones actualizan la revisión de la ficha al terminar.
+  async function ejecutar(operacion, confirmacion) {
     establecerGuardando(true);
     establecerError("");
     establecerMensaje("");
-    const datos = Object.fromEntries(new FormData(evento.currentTarget));
     try {
-      establecerOrden(await guardarDiagnostico(usuario, orden, datos));
-      establecerMensaje("Diagnóstico guardado.");
+      const resultado = await operacion();
+      if (!resultado) return;
+      establecerOrden(resultado);
+      establecerMensaje(confirmacion);
     } catch (fallo) {
       establecerError(explicarError(fallo));
     } finally {
       establecerGuardando(false);
     }
+  }
+
+  function guardar(evento) {
+    evento.preventDefault();
+    const datos = Object.fromEntries(new FormData(evento.currentTarget));
+    ejecutar(() => {
+      validarDiagnostico(datos);
+      if (datos.estado === "Finalizado" &&
+          !window.confirm("¿Quieres finalizar esta orden?")) return;
+      return guardarDiagnostico(usuario, orden, datos);
+    }, datos.estado === "Finalizado" ? "Orden finalizada." : "Diagnóstico guardado.");
+  }
+
+  function guardarAsignacion(evento) {
+    evento.preventDefault();
+    const mecanicoId = new FormData(evento.currentTarget).get("mecanicoId");
+    if (mecanicoId === orden.mecanicoId) return;
+    ejecutar(() => asignarMecanico(usuario, orden, mecanicoId, equipo), "Asignación actualizada.");
+  }
+  function eliminar() {
+    const confirmacion = window.prompt("Escribe CONFIRMAR para enviar la orden a la papelera durante 15 días.");
+    if (confirmacion === null) return;
+    ejecutar(async () => {
+      await enviarAPapelera(usuario, orden, confirmacion);
+      navegador.push("/papelera");
+    });
   }
   if (!orden)
     return error ? (
@@ -62,6 +95,10 @@ export default function FichaOrden({ identificador }) {
   const puedeEditar =
     ["ADMINISTRACION", "MECANICO"].includes(usuario.perfil) &&
     orden.estado !== "Finalizado";
+  const puedeAsignar =
+    ["ADMINISTRACION", "RECEPCION"].includes(usuario.perfil) &&
+    orden.estado !== "Finalizado";
+  const mecanicos = equipo.filter((persona) => persona.perfil === "MECANICO" && persona.activo);
   return (
     <>
       <Link className="enlace" href="/ordenes">
@@ -98,16 +135,35 @@ export default function FichaOrden({ identificador }) {
             <dd>
               {equipo.find(
                 (persona) => persona.identificador === orden.mecanicoId,
-              )?.nombre || "Sin asignar"}
+              )?.nombre || (orden.mecanicoId ? "Mecánico no disponible" : "Sin asignar")}
             </dd>
             <dt>Fecha de entrada</dt>
             <dd>{new Date(orden.creadaEn).toLocaleString("es-ES")}</dd>
           </dl>
+          {puedeAsignar ? (
+            <form key={orden.mecanicoId} onSubmit={guardarAsignacion}>
+              <fieldset disabled={guardando}>
+                <label>
+                  Cambiar mecánico
+                  <select name="mecanicoId" defaultValue={orden.mecanicoId}>
+                    <option value="">Sin asignar</option>
+                    {orden.mecanicoId && !mecanicos.some((persona) => persona.identificador === orden.mecanicoId) ? (
+                      <option value={orden.mecanicoId} disabled>Mecánico no disponible</option>
+                    ) : null}
+                    {mecanicos.map((persona) => (
+                      <option key={persona.identificador} value={persona.identificador}>{persona.nombre}</option>
+                    ))}
+                  </select>
+                </label>
+                <button className="boton principal">Guardar asignación</button>
+              </fieldset>
+            </form>
+          ) : null}
           <h3>Motivo de la visita</h3>
           <p className="texto-largo">{orden.motivo}</p>
         </section>
-        {/* Al cambiar la revisión se reconstruye el formulario con los valores guardados. */}
-        <form className="tarjeta" key={orden.revision} onSubmit={guardar}>
+        {/* Una reasignación no borra el diagnóstico que se está escribiendo. */}
+        <form className="tarjeta" key={JSON.stringify([orden.identificador, orden.diagnostico, orden.estado])} onSubmit={guardar}>
           <h2>Diagnóstico y seguimiento</h2>
           <fieldset disabled={!puedeEditar || guardando}>
             <label>
@@ -140,8 +196,29 @@ export default function FichaOrden({ identificador }) {
               Orden finalizada. Disponible para consulta.
             </p>
           ) : null}
+          {orden.estado === "Finalizado" && usuario.perfil === "ADMINISTRACION" ? (
+            <button
+              className="boton principal"
+              type="button"
+              disabled={guardando}
+              onClick={() => ejecutar(() => reabrirOrden(usuario, orden), "Orden reabierta.")}
+            >
+              Reabrir orden
+            </button>
+          ) : null}
         </form>
       </div>
+      <GaleriaOrden key={`galeria-${orden.identificador}`} usuario={usuario} orden={orden}
+        guardando={guardando} ejecutar={ejecutar} />
+      <DocumentosOrden key={`documentos-${orden.identificador}`} usuario={usuario} orden={orden}
+        guardando={guardando} ejecutar={ejecutar} />
+      {usuario.perfil === "ADMINISTRACION" && (
+        <div className="acciones-formulario">
+          <button className="boton secundario" type="button" disabled={guardando} onClick={eliminar}>
+            Enviar a la papelera
+          </button>
+        </div>
+      )}
     </>
   );
 }

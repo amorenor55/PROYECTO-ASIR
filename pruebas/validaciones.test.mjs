@@ -57,3 +57,9 @@ test("un perfil no puede asumir funciones de recepción", () => {
     comprobarPerfil({ perfil: "MECANICO" }, ["ADMINISTRACION", "RECEPCION"]),
   );
 });
+
+
+test("finalizar exige un diagnóstico con contenido", () => {
+  assert.throws(() => validarDiagnostico({ diagnostico: "  \n ", estado: "Finalizado" }));
+  assert.equal(validarDiagnostico({ diagnostico: " Revisado ", estado: "Finalizado" }).diagnostico, "Revisado");
+});
